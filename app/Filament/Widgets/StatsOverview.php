@@ -43,6 +43,7 @@ class StatsOverview extends BaseWidget
                 });
 
                 $ganancia = $totalPagado - $capitalPagado;
+                dd('');
 
 
                 return [
