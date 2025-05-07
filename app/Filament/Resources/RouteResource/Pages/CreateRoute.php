@@ -1,0 +1,17 @@
+<?php
+
+namespace App\Filament\Resources\RouteResource\Pages;
+
+use App\Filament\Resources\RouteResource;
+use Filament\Actions;
+use Filament\Resources\Pages\CreateRecord;
+
+class CreateRoute extends CreateRecord
+{
+    protected static string $resource = RouteResource::class;
+
+    protected function getRedirectUrl(): string
+    {
+        return $this->getResource()::getUrl('index'); // Redirige al listado
+    }
+}
