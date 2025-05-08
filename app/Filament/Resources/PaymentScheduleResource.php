@@ -7,6 +7,7 @@ use App\Filament\Resources\PaymentScheduleResource\RelationManagers;
 use App\Models\Loan;
 use App\Models\PaymentSchedule;
 use App\Models\Route;
+use Carbon\Carbon;
 use Filament\Forms;
 use Filament\Forms\Form;
 use Filament\Resources\Resource;
@@ -16,6 +17,8 @@ use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\SoftDeletingScope;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use Throwable;
 
 class PaymentScheduleResource extends Resource
 {
@@ -30,6 +33,29 @@ class PaymentScheduleResource extends Resource
     {
         $query = parent::getEloquentQuery();
 
+        $pysch = PaymentSchedule::whereNotIn('payment_status', ['paid', 'canceled', 'partial'])
+            ->where('due_date', '<', Carbon::today()->format('Y-m-d'))
+            ->get();
+
+        if (count($pysch) > 0) {
+
+            try {
+                return DB::transaction(function () use ($pysch) {
+
+                    foreach ($pysch as $schedule) {
+                        $schedule->update(['payment_status' => 'overdue']);
+                    }
+
+                    dd($pysch[0]->loan_id);
+                });
+            } catch (Throwable $e) {
+                report($e);
+                throw $e;
+            }
+
+            //dd($pysch);
+        }
+
         $user = Auth::user();
 
         switch ($user->role->name) {
@@ -40,7 +66,7 @@ class PaymentScheduleResource extends Resource
 
                 $loans = Loan::whereIn('route_id', $routes)->whereNotIn('status', ['paid', 'canceled'])->pluck('id');
 
-                $query->whereIn('loan_id', $loans)->where('payment_status', '!=', 'complete')->where('due_date', now()->format('Y-m-d'));
+                $query->whereIn('loan_id', $loans)->where('payment_status', '!=', 'paid')->where('due_date', Carbon::today()->format('Y-m-d'));
                 break;
 
             case 'Prestamista':
@@ -49,7 +75,10 @@ class PaymentScheduleResource extends Resource
 
                 $loans = Loan::whereIn('route_id', $routes)->whereNotIn('status', ['paid', 'canceled'])->pluck('id');
 
-                $query->whereIn('loan_id', $loans)->where('payment_status', '!=', 'complete');
+                $query->whereIn('loan_id', $loans)
+                    ->where('payment_status', '!=', 'paid')
+                    ->where('due_date', '<=', Carbon::today()->format('Y-m-d'))
+                    ->orWhere('due_date', '<', Carbon::today()->format('Y-m-d'));
         }
 
 
@@ -76,6 +105,28 @@ class PaymentScheduleResource extends Resource
                 Tables\Columns\TextColumn::make('loan.customer.phone')
                     ->label('Teléfono')
                     ->searchable(),
+                Tables\Columns\TextColumn::make('loan.route.name')
+                    ->label('Ruta')
+                    ->searchable()
+                    ->visible(
+                        function () {
+
+                            $visible = false;
+
+                            $user = Auth::user();
+
+                            switch ($user->role->name) {
+                                case 'Desarrollador':
+                                    $visible = true;
+                                    break;
+                                case 'Prestamista':
+                                    $visible = true;
+                                    break;
+                            }
+
+                            return $visible;
+                        }
+                    ),
                 Tables\Columns\TextColumn::make('due_date')
                     ->label('Vencimiento')
                     ->dateTimeTooltip()
@@ -116,21 +167,7 @@ class PaymentScheduleResource extends Resource
                     ->label('Día Pago')
                     ->dateTimeTooltip(),
             ])
-            ->filters([
-                SelectFilter::make('payment_status')
-                    ->multiple()
-                    ->label('Estado')
-                    ->preload()
-                    ->options([
-                        'active' => 'Activo',
-                        'paid' => 'Pagado',
-                        'canceled' => 'Cancelado',
-                        'overdue' => 'Vencido',
-                        'pending' => 'Pendiente',
-                        'partial' => 'Parcial',
-                    ])
-                    ->placeholder('Seleccionar Estado'),
-            ])
+            ->filters([])
             ->actions([])
             ->bulkActions([]);
     }

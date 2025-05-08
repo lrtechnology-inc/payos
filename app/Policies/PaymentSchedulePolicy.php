@@ -23,6 +23,9 @@ class PaymentSchedulePolicy
             case 'Desarrollador':
                 $canView = true;
                 break;
+            case 'Prestamista':
+                $canView = true;
+                break;
 
             default:
                 $canView = false;

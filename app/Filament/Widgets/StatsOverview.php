@@ -20,10 +20,19 @@ class StatsOverview extends BaseWidget
 
         switch ($user->role->name) {
             case 'Desarrollador':
+
+                $loans = Loan::whereNotIn('status', ['paid', 'canceled'])->get();
+                $routes = Route::where('active', true)->get();
+
+
                 return [
                     Stat::make('Total Compañias', Company::count()),
                     Stat::make('Total Rutas', Route::count()),
+                    Stat::make('Rutas Activas', Route::where('active', true)->get()->count()),
+                    Stat::make('Rutas Inactivas', Route::where('active', false)->get()->count()),
                     Stat::make('Total Clientes', Customer::count()),
+                    Stat::make('Prestamos Activos', Loan::whereNotIn('status', ['paid', 'canceled'])->get()->count()),
+
                 ];
 
             case 'Prestamista':
@@ -31,7 +40,7 @@ class StatsOverview extends BaseWidget
                     'customer_id',
                     Customer::where('company_id', $user->company_id)->pluck('id')
                 )
-                    ->whereNotIn('status', ['paid', 'cancelled'])
+                    ->whereNotIn('status', ['paid', 'canceled'])
                     ->get();
 
                 $capitalPagado = $loans->sum(function ($loan) {
@@ -43,8 +52,6 @@ class StatsOverview extends BaseWidget
                 });
 
                 $ganancia = $totalPagado - $capitalPagado;
-                dd('');
-
 
                 return [
                     Stat::make('Total Rutas', Route::where('company_id', $user->company_id)->count())
@@ -52,10 +59,10 @@ class StatsOverview extends BaseWidget
                     Stat::make('Clientes Activos', Customer::where('company_id', $user->company_id)->where('active', operator: true)->count()),
                     Stat::make('Clientes Inactivos', Customer::where('company_id', $user->company_id)->where('active', operator: false)->count()),
                     Stat::make('Cobradores', User::where('company_id', $user->company_id)->where('role_id', Role::where('name', 'Cobrador')->first()->id)->count()),
-                    Stat::make('Préstamos Vigentes', Loan::whereIn('customer_id', Customer::where('company_id', $user->company_id)->pluck('id'))->whereNotIn('status', ['paid', 'cancelled'])->count())
+                    Stat::make('Préstamos Vigentes', Loan::whereIn('customer_id', Customer::where('company_id', $user->company_id)->pluck('id'))->whereNotIn('status', ['paid', 'canceled'])->count())
                         ->description('Vencidos / Atrasados (' . Loan::whereIn('customer_id', Customer::where('company_id', $user->company_id)->pluck('id'))->where('status', 'overdue')->count() . ')')
                         ->color('danger'),
-                    Stat::make('$ Capital Prestado', number_format(Loan::whereIn('customer_id', Customer::where('company_id', $user->company_id)->pluck('id'))->whereNotIn('status', ['paid', 'cancelled'])->sum('amount'), 0)),
+                    Stat::make('$ Capital Prestado', number_format(Loan::whereIn('customer_id', Customer::where('company_id', $user->company_id)->pluck('id'))->whereNotIn('status', ['paid', 'canceled'])->sum('amount'), 0)),
                     Stat::make('$ Capital Pagado', number_format($capitalPagado, 0)),
                     Stat::make('$ Ganancia', number_format($ganancia, 0)),
                 ];
