@@ -5,6 +5,7 @@ namespace App\Filament\Resources\PaymentResource\Pages;
 use App\Filament\Resources\PaymentResource;
 use App\Models\Loan;
 use App\Models\PaymentSchedule;
+use Carbon\Carbon;
 use Filament\Actions;
 use Filament\Forms\ComponentContainer;
 use Filament\Notifications\Actions\Action;
@@ -31,7 +32,9 @@ class CreatePayment extends CreateRecord
 
                 $loan = Loan::find($data['loan_id']);
 
-                $pysch = PaymentSchedule::where('loan_id', $data['loan_id'])->whereIn('payment_status', ['pending', 'partial'])->orderBy('due_date', 'asc')->get();
+                $pysch = PaymentSchedule::where('loan_id', $data['loan_id'])->whereIn('payment_status', ['pending', 'partial', 'overdue'])->orderBy('due_date', 'asc')->get();
+
+                //dd($data['payment_amount']);
 
                 $payment = static::getModel()::create($data);
 
@@ -122,6 +125,29 @@ class CreatePayment extends CreateRecord
                         $loan->update([
                             'next_payment_date' => $pysch->due_date,
                         ]);
+
+                        $pysch = PaymentSchedule::whereNotIn('payment_status', ['paid', 'canceled', 'partial'])
+                            ->where('due_date', '<', Carbon::today()->format('Y-m-d'))
+                            ->where('loan_id', $data['loan_id'])
+                            ->get();
+
+                        if (count($pysch) > 0) {
+
+                            foreach ($pysch as $schedule) {
+                                $schedule->update(['payment_status' => 'overdue']);
+                            }
+
+                            $loan->update([
+                                'status' => 'overdue',
+                            ]);
+                        }
+
+                        if ($loan->next_payment_date > Carbon::today()->format('Y-m-d')) {
+
+                            $loan->update([
+                                'status' => 'active',
+                            ]);
+                        }
                     }
 
                     return $payment;

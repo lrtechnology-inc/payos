@@ -8,6 +8,7 @@ use App\Models\Customer;
 use App\Models\Loan;
 use App\Models\Route;
 use App\Models\PaymentSchedule;
+use Carbon\Carbon;
 use Filament\Forms;
 use Filament\Forms\Components\Fieldset;
 use Filament\Forms\Components\Section;
@@ -18,6 +19,8 @@ use Filament\Tables\Actions\ActionGroup;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use Throwable;
 
 class LoanResource extends Resource
 {
@@ -34,7 +37,71 @@ class LoanResource extends Resource
 
         $user = Auth::user();
 
-        switch ($user->role->name) {
+        if ($user->role != 'Desarrollador') {
+
+            $routeuser = Route::where('company_id', $user->company_id)
+                ->pluck('id')->toArray();
+
+            $loans = Loan::whereIn('route_id', $routeuser)->pluck('id')->toarray();
+
+            $loanover = PaymentSchedule::whereIn('loan_id', $loans)
+                ->whereNotIn('payment_status', ['paid', 'canceled', 'partial'])
+                ->where('due_date', '<', Carbon::today()->format('Y-m-d'))
+                ->distinct('loan_id')
+                ->pluck('loan_id')
+                ->toArray();
+
+            if (count($loanover) > 0) {
+
+                try {
+                    return DB::transaction(function () use ($loanover, $user, $query) {
+
+                        foreach ($loanover as $ln) {
+
+                            $pysch = PaymentSchedule::whereNotIn('payment_status', ['paid', 'canceled', 'partial'])
+                                ->where('due_date', '<', Carbon::today()->format('Y-m-d'))
+                                ->where('loan_id', $ln)
+                                ->get();
+
+                            foreach ($pysch as $schedule) {
+                                $schedule->update(['payment_status' => 'overdue']);
+                            }
+
+                            $loan = Loan::find($ln);
+
+                            $loan->update([
+                                'status' => 'overdue',
+                            ]);
+
+                            switch ($user->role->name) {
+
+                                case 'Prestamista':
+                                    $query->whereHas('route', function ($q) use ($user) {
+                                        $q->where('company_id', $user->company_id);
+                                    });
+                                    break;
+
+                                case 'Cobrador':
+                                    $query->whereHas('route', function ($q) use ($user) {
+                                        $q->where('collector_id', $user->id);
+                                    });
+                                    break;
+                            }
+
+
+                            return $query;
+
+                            //dd($loan, $pysch);
+                        }
+                    });
+                } catch (Throwable $e) {
+                    report($e);
+                    throw $e;
+                }
+            }
+        }
+
+        /*switch ($user->role->name) {
 
             case 'Prestamista':
                 $query->whereHas('route', function ($q) use ($user) {
@@ -47,7 +114,7 @@ class LoanResource extends Resource
                     $q->where('collector_id', $user->id);
                 });
                 break;
-        }
+        }*/
 
         return $query;
     }
@@ -281,7 +348,7 @@ class LoanResource extends Resource
                         'active' => 'success',
                         'paid' => 'primary',
                         'canceled' => 'danger',
-                        'overdue' => 'warning',
+                        'overdue' => 'danger',
                     }),
                 Tables\Columns\TextColumn::make('Valor Cuota')
                     ->label('Valor Cuota')

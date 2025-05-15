@@ -18,6 +18,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\SoftDeletingScope;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Throwable;
 
 class PaymentScheduleResource extends Resource
@@ -29,58 +30,130 @@ class PaymentScheduleResource extends Resource
     protected static ?string $label = 'Calendario Pago';
     protected static ?string $pluralLabel = 'Calendario Pagos';
 
+
+
     public static function getEloquentQuery(): Builder
     {
         $query = parent::getEloquentQuery();
 
-        $pysch = PaymentSchedule::whereNotIn('payment_status', ['paid', 'canceled', 'partial'])
-            ->where('due_date', '<', Carbon::today()->format('Y-m-d'))
-            ->get();
-
-        if (count($pysch) > 0) {
-
-            try {
-                return DB::transaction(function () use ($pysch) {
-
-                    foreach ($pysch as $schedule) {
-                        $schedule->update(['payment_status' => 'overdue']);
-                    }
-
-                    dd($pysch[0]->loan_id);
-                });
-            } catch (Throwable $e) {
-                report($e);
-                throw $e;
-            }
-
-            //dd($pysch);
-        }
-
         $user = Auth::user();
 
-        switch ($user->role->name) {
+        if ($user->role != 'Desarrollador') {
 
-            case 'Cobrador':
+            $routeuser = Route::where('company_id', $user->company_id)
+                ->pluck('id')->toArray();
 
-                $routes = Route::where('collector_id', $user->id)->pluck('id');
+            $loans = Loan::whereIn('route_id', $routeuser)->pluck('id')->toarray();
 
-                $loans = Loan::whereIn('route_id', $routes)->whereNotIn('status', ['paid', 'canceled'])->pluck('id');
+            $loanover = PaymentSchedule::whereIn('loan_id', $loans)
+                ->whereNotIn('payment_status', ['paid', 'canceled', 'partial'])
+                ->where('due_date', '<', Carbon::today()->format('Y-m-d'))
+                ->distinct('loan_id')
+                ->pluck('loan_id')
+                ->toArray();
 
-                $query->whereIn('loan_id', $loans)->where('payment_status', '!=', 'paid')->where('due_date', Carbon::today()->format('Y-m-d'));
-                break;
+            if (count($loanover) > 0) {
 
-            case 'Prestamista':
+                try {
+                    return DB::transaction(function () use ($loanover, $user, $query) {
 
-                $routes = Route::where('company_id', $user->company_id)->pluck('id');
+                        foreach ($loanover as $ln) {
 
-                $loans = Loan::whereIn('route_id', $routes)->whereNotIn('status', ['paid', 'canceled'])->pluck('id');
+                            $pysch = PaymentSchedule::whereNotIn('payment_status', ['paid', 'canceled', 'partial'])
+                                ->where('due_date', '<', Carbon::today()->format('Y-m-d'))
+                                ->where('loan_id', $ln)
+                                ->get();
 
-                $query->whereIn('loan_id', $loans)
-                    ->where('payment_status', '!=', 'paid')
-                    ->where('due_date', '<=', Carbon::today()->format('Y-m-d'))
-                    ->orWhere('due_date', '<', Carbon::today()->format('Y-m-d'));
+                            foreach ($pysch as $schedule) {
+                                $schedule->update(['payment_status' => 'overdue']);
+                            }
+
+                            $loan = Loan::find($ln);
+
+                            $loan->update([
+                                'status' => 'overdue',
+                            ]);
+
+                            switch ($user->role->name) {
+
+                                case 'Cobrador':
+
+                                    $routes = Route::where('collector_id', $user->id)->pluck('id');
+
+                                    $loans = Loan::whereIn('route_id', $routes)->whereNotIn('status', ['paid', 'canceled'])->pluck('id');
+
+                                    $query = PaymentSchedule::query()
+                                        ->where(function ($query) {
+                                            $query->whereIn('payment_status', ['overdue', 'partial'])
+                                                ->orWhere(function ($q) {
+                                                    $q->where('due_date', '>', Carbon::today())
+                                                        ->where('payment_status', '!=', 'paid');
+                                                });
+                                        });
+
+                                    break;
+
+                                case 'Prestamista':
+
+                                    $routes = Route::where('company_id', $user->company_id)->pluck('id');
+                                    $loans = Loan::whereIn('route_id', $routes)
+                                        ->whereNotIn('status', ['paid', 'canceled'])
+                                        ->pluck('id');
+
+                                    $query = PaymentSchedule::query()
+                                        ->where(function ($query) use ($loans) {
+                                            $query->whereIn('loan_id', $loans)
+                                                ->whereIn('payment_status', ['overdue', 'partial'])
+                                                ->orWhere(function ($q) {
+                                                    $q->where('due_date', '<=', Carbon::today())
+                                                        ->where('payment_status', '!=', 'paid');
+                                                });
+                                        });
+
+                                    break;
+                            }
+
+                            return $query;
+                        }
+                    });
+                } catch (Throwable $e) {
+                    report($e);
+                    throw $e;
+                }
+            } else {
+                switch ($user->role->name) {
+
+                    case 'Cobrador':
+
+                        $routes = Route::where('collector_id', $user->id)->pluck('id');
+
+                        $loans = Loan::whereIn('route_id', $routes)->whereNotIn('status', ['paid', 'canceled'])->pluck('id');
+
+                        $query->whereIn('loan_id', $loans)->where('payment_status', '!=', 'paid')->where('due_date', Carbon::today()->format('Y-m-d'));
+
+                        break;
+
+                    case 'Prestamista':
+
+                        $routes = Route::where('company_id', $user->company_id)->pluck('id');
+                        $loans = Loan::whereIn('route_id', $routes)
+                            ->whereNotIn('status', ['paid', 'canceled'])
+                            ->pluck('id');
+
+                        $query = PaymentSchedule::query()
+                            ->where(function ($query) use ($loans) {
+                                $query->whereIn('loan_id', $loans)
+                                    ->whereIn('payment_status', ['overdue', 'partial'])
+                                    ->orWhere(function ($q) {
+                                        $q->where('due_date', '<=', Carbon::today())
+                                            ->where('payment_status', '!=', 'paid');
+                                    });
+                            });
+
+                        break;
+                }
+            }
         }
-
 
         return $query;
     }

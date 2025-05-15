@@ -24,6 +24,8 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\SoftDeletingScope;
 use Illuminate\Support\Facades\Auth;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\DB;
+use Throwable;
 
 class PaymentResource extends Resource
 {
@@ -39,28 +41,74 @@ class PaymentResource extends Resource
 
         $user = Auth::user();
 
-        switch ($user->role->name) {
+        if ($user->role != 'Desarrollador') {
 
-            case 'Cobrador':
+            $routeuser = Route::where('company_id', $user->company_id)
+                ->pluck('id')->toArray();
 
-                $routes = Route::where('collector_id', $user->id)->pluck('id');
+            $loans = Loan::whereIn('route_id', $routeuser)->pluck('id')->toarray();
 
-                $loans = Loan::whereIn('route_id', $routes)->whereNotIn('status', ['paid', 'canceled'])->pluck('id');
+            $loanover = PaymentSchedule::whereIn('loan_id', $loans)
+                ->whereNotIn('payment_status', ['paid', 'canceled', 'partial'])
+                ->where('due_date', '<', Carbon::today()->format('Y-m-d'))
+                ->distinct('loan_id')
+                ->pluck('loan_id')
+                ->toArray();
 
-                $query->whereIn('loan_id', $loans);
-                break;
+            if (count($loanover) > 0) {
 
-            case 'Prestamista':
+                try {
+                    return DB::transaction(function () use ($loanover, $user, $query) {
 
-                $routes = Route::where('company_id', $user->company_id)->pluck('id');
+                        foreach ($loanover as $ln) {
 
-                $loans = Loan::whereIn('route_id', $routes)->whereNotIn('status', ['paid', 'canceled'])->pluck('id');
+                            $pysch = PaymentSchedule::whereNotIn('payment_status', ['paid', 'canceled', 'partial'])
+                                ->where('due_date', '<', Carbon::today()->format('Y-m-d'))
+                                ->where('loan_id', $ln)
+                                ->get();
 
-                $query->whereIn('loan_id', $loans)
-                    //->where('payment_date', '>=', Carbon::today())
-                ;
+                            foreach ($pysch as $schedule) {
+                                $schedule->update(['payment_status' => 'overdue']);
+                            }
 
-                break;
+                            $loan = Loan::find($ln);
+
+                            $loan->update([
+                                'status' => 'overdue',
+                            ]);
+
+                            switch ($user->role->name) {
+
+                                case 'Cobrador':
+
+                                    $routes = Route::where('collector_id', $user->id)->pluck('id');
+
+                                    $loans = Loan::whereIn('route_id', $routes)->whereNotIn('status', ['paid', 'canceled'])->pluck('id');
+
+                                    $query->whereIn('loan_id', $loans);
+                                    break;
+
+                                case 'Prestamista':
+
+                                    $routes = Route::where('company_id', $user->company_id)->pluck('id');
+
+                                    $loans = Loan::whereIn('route_id', $routes)->whereNotIn('status', ['paid', 'canceled'])->pluck('id');
+
+                                    $query->whereIn('loan_id', $loans)
+                                        //->where('payment_date', '>=', Carbon::today())
+                                    ;
+                            }
+
+                            return $query;
+
+                            //dd($loan, $pysch);
+                        }
+                    });
+                } catch (Throwable $e) {
+                    report($e);
+                    throw $e;
+                }
+            }
         }
 
         return $query;
@@ -202,6 +250,178 @@ class PaymentResource extends Resource
             ->actions([
                 ActionGroup::make([
                     Tables\Actions\EditAction::make(),
+                    Tables\Actions\DeleteAction::make()
+                        ->before(function ($record) {
+
+                            try {
+                                DB::transaction(function () use ($record) {
+
+                                    $pyschsum = PaymentSchedule::where('payment_id', $record->id)
+                                        ->where('paid_amount', '!=', null)
+                                        ->sum('paid_amount');
+
+                                    $loan = Loan::find($record->loan_id);
+
+                                    /*$pycta = PaymentSchedule::where('payment_id', $record->id)
+                                        ->first();
+
+                                    $ctas = floor($pyschsum / $pycta->installment_amount);*/
+
+                                    $pycta = $loan->total_amount / $loan->quantity_installments;
+                                    //dd($loan, $pycta);
+                                    $ctas = floor($pyschsum / $pycta);
+
+                                    $valback = $pyschsum - $record->payment_amount;
+
+                                    $pysch = PaymentSchedule::where('payment_id', $record->id)
+                                        ->get();
+
+                                    $ctacp = 0;
+
+                                    $pyam = $valback;
+
+                                    foreach ($pysch as $pyschItem) {
+
+                                        $pyschItem->update([
+                                            'payment_date' => null,
+                                            'paid_amount' => null,
+                                            'payment_id' => null,
+                                            'payment_status' => 'pending'
+                                        ]);
+                                    }
+
+                                    $loan->update([
+                                        'remaining_amount' => $loan->remaining_amount + $record->payment_amount,
+                                        'payment_count' => $loan->payment_count - $ctas,
+                                        'paid_amount' => $loan->paid_amount - $record->payment_amount,
+                                        'next_payment_date' => null
+                                    ]);
+
+                                    $pysch = PaymentSchedule::where('loan_id', $record->loan_id)
+                                        ->where('paid_amount', '!=', $pycta)
+                                        ->orwhere('paid_amount', null)
+                                        ->orderby('due_date', 'asc')
+                                        ->get();
+
+                                    $mxpysch = PaymentSchedule::where('loan_id', $record->loan_id)
+                                        ->where('payment_id', '!=', null)
+                                        ->orderby('payment_id', 'desc')
+                                        ->pluck('payment_id')
+                                        ->first();
+
+                                    $pmtdt = Payment::where('id', $mxpysch)->pluck('payment_date')->first();
+
+                                    foreach ($pysch as $pyschItem) {
+
+                                        //dd($pysch);
+
+                                        if ($pyschItem->payment_status == 'partial') {
+
+                                            $dif = $pyschItem->installment_amount - $pyschItem->paid_amount;
+
+                                            if ($dif > $pyam) {
+
+                                                $pyschItem->update([
+                                                    'payment_status' => 'partial',
+                                                    'payment_date' => $pmtdt,
+                                                    'paid_amount' => $pyschItem->paid_amount + $pyam,
+                                                    'payment_id' => $mxpysch,
+                                                ]);
+
+                                                $pyam = 0;
+                                            } elseif ($dif <= $pyam) {
+
+                                                $pyschItem->update([
+                                                    'payment_status' => 'paid',
+                                                    'payment_date' => $pmtdt,
+                                                    'paid_amount' => $pyschItem->installment_amount,
+                                                    'payment_id' => $mxpysch,
+                                                ]);
+
+                                                $pyam = $pyam - $dif;
+
+                                                $ctacp += 1;
+                                            }
+                                        } else {
+
+                                            if ($pyam >= $pyschItem->installment_amount) {
+
+                                                $pyschItem->update([
+                                                    'payment_status' => 'paid',
+                                                    'payment_date' => $pmtdt,
+                                                    'paid_amount' => $pyschItem->installment_amount,
+                                                    'payment_id' => $mxpysch,
+                                                ]);
+
+                                                $pyam = $pyam - $pyschItem->installment_amount;
+
+                                                $ctacp += 1;
+                                            } elseif ($pyam < $pyschItem->installment_amount && $pyam > 0) {
+
+                                                $pyschItem->update([
+                                                    'payment_status' => 'partial',
+                                                    'payment_date' => $pmtdt,
+                                                    'paid_amount' => $pyam,
+                                                    'payment_id' => $mxpysch,
+                                                ]);
+
+                                                $pyam = 0;
+                                            }
+
+                                            if ($pyam == 0) {
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    //$npysch = PaymentSchedule::where('loan_id', $record->loan_id)->get();
+
+                                    $loan->update([
+                                        'payment_count' => $loan->payment_count + $ctacp,
+                                    ]);
+
+                                    if ($loan->quantity_installments == $loan->payment_count && $loan->remaining_amount == 0) {
+
+                                        $loan->update([
+                                            'status' => 'paid',
+                                        ]);
+                                    } else {
+
+                                        $pysch = PaymentSchedule::where('loan_id', $record->loan_id)->where('payment_status', '!=', 'paid')->orderBy('due_date', 'asc')->first();
+
+                                        $loan->update([
+                                            'next_payment_date' => $pysch->due_date,
+                                        ]);
+
+                                        $pysch = PaymentSchedule::whereNotIn('payment_status', ['paid', 'canceled', 'partial'])
+                                            ->where('due_date', '<', Carbon::today()->format('Y-m-d'))
+                                            ->where('loan_id', $record->loan_id)
+                                            ->get();
+
+                                        if (count($pysch) > 0) {
+
+                                            foreach ($pysch as $schedule) {
+                                                $schedule->update(['payment_status' => 'overdue']);
+                                            }
+
+                                            $loan->update([
+                                                'status' => 'overdue',
+                                            ]);
+                                        }
+
+                                        if ($loan->next_payment_date > Carbon::today()->format('Y-m-d')) {
+
+                                            $loan->update([
+                                                'status' => 'active',
+                                            ]);
+                                        }
+                                    }
+                                    Payment::where('id', $record->id)->delete();
+                                });
+                            } catch (Throwable $e) {
+                                dd($e);
+                            }
+                        }),
                 ])
                     ->tooltip('Acciones')
             ])
